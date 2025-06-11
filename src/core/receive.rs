@@ -1,0 +1,185 @@
+use std::fs::{File, read};
+use std::io::{Read, Write, BufReader};
+use std::net::{UdpSocket, TcpStream};
+
+use crate::{Packet, PacketType, FileInfo};
+
+pub fn read_network_file(filename: &str) -> FileInfo {
+    let file = std::fs::read_to_string(filename)
+        .expect("[ERROR] Failed to read file");
+
+    serde_json::from_str(file.as_str())
+        .expect("[ERROR] Failed to parse input file")
+}
+
+// Ping list of peers stated in file info
+// to ensure they are active and have
+// the correct file
+pub fn find_peers(peers: &Vec<String>) -> Vec<String> {
+    let mut active: Vec<String> = Vec::new();
+    
+    // Create Ack packet 
+    let packet = Packet {
+        packet_type: PacketType::ACK,
+        id: 0,
+        content: String::new(),
+    };
+    let data = serde_json::to_string(&packet)
+        .expect("Failed to serialize packet");
+    let bytes = data.as_bytes();
+
+    // Collect active peers
+    for peer in peers {
+        let mut addr: String = peer.clone();
+        addr.push_str(":8080");
+
+        // Connect to peer
+        let mut socket: TcpStream;
+        match TcpStream::connect(addr.clone()) {
+            Ok(s) => { socket = s; },
+            Err(_) => continue
+        }
+
+        // Send Ack packet
+        match socket.write(&bytes) {
+            Ok(_) => (),
+            Err(_) => continue
+        }
+        socket.flush().unwrap();
+
+        // Wait for response
+        let mut response = String::new();
+        match socket.read_to_string(&mut response) {
+            Ok(s) => {
+                if s > 0 {
+                    active.push(addr.clone());
+                }
+            },
+            Err(_) => continue
+        }
+    }
+
+    active
+}
+
+// Ensure that each peer has the desired file
+pub fn request_file_exists(peers: &Vec<String>, file: String) -> Vec<String> {
+    let packet = Packet {
+        packet_type: PacketType::FILE,
+        id: 0,
+        content: file.clone(),
+    };
+    let data = serde_json::to_string(&packet)
+        .expect("Failed to serialize packet");
+    let bytes = data.as_bytes();
+
+    let mut valid: Vec<String> = Vec::new();
+    for peer in peers {
+        let mut socket: TcpStream; 
+        match TcpStream::connect(peer) {
+            Ok(s) => { socket = s; },
+            Err(_) => continue,
+        }
+        
+        socket.write(&bytes).unwrap();
+        socket.flush().unwrap();
+    
+        let mut response = String::new();
+        match socket.read_to_string(&mut response) {
+            Ok(s) => {
+                if s <= 0 {
+                    continue;
+                }
+                let p: Packet = serde_json::from_str(response.as_str()).unwrap();
+                if p.packet_type != PacketType::CONFIRM {
+                    continue
+                }
+
+            },
+            Err(_) => continue
+        }
+
+        valid.push(peer.clone());
+    }
+
+    valid
+}
+
+// What if a peer is assigned a piece it doesn't have?
+// -> Then they never had the full file to begin with
+// What if peer fails to send their assigned piece?
+// -> We need to have some method to ask a different peer
+//    for the same piece
+pub fn assign_pieces(peers: &Vec<String>, filesize: u64) {
+    let pieces: u64 = filesize / 512000;
+    let peer_count: u64 = peers.len() as u64;
+    let iter = std::cmp::min(peers.len() as u64, pieces);
+
+    // Send out requests for pieces
+    for i in 0..iter {
+        let index = (i % peer_count) as usize;
+        let peer = peers.get(index).unwrap();
+        let mut socket = TcpStream::connect(peer).unwrap();
+        
+        let packet = Packet {
+            packet_type: PacketType::REQUEST,
+            id: i,
+            content: String::new(),
+        };
+        let data = serde_json::to_string(&packet).unwrap();
+        let bytes = data.as_bytes();
+
+        socket.write(bytes).unwrap();
+    }
+
+    // Let peers know that we are done
+    // assigning pieces
+    for peer in peers {
+        let mut socket = TcpStream::connect(peer).unwrap();
+
+        let packet = Packet {
+            packet_type: PacketType::ACK,
+            id: 0,
+            content: String::new(),
+        };
+        let data = serde_json::to_string(&packet).unwrap();
+        let bytes = data.as_bytes();
+
+        socket.write(bytes).unwrap();
+    }
+}
+
+pub fn receive(info: FileInfo) -> std::io::Result<Vec<u8>> {
+    let socket = UdpSocket::bind("127.0.0.1:8080")?;
+
+    let mut file: Vec<u8> = Vec::with_capacity(info.size as usize);
+    
+    let mut expected_pieces: u64 = info.size / 512000;
+    if info.size % 512000 != 0 {
+        expected_pieces += 1;
+    }
+    let mut current_pieces: u64 = 0;
+
+    while current_pieces < expected_pieces {
+        let mut buf: Vec<u8> = Vec::new();
+        let (_, _) = socket.recv_from(&mut buf)?;
+        
+        let data = String::from_utf8(buf).unwrap();
+        let packet: Packet = serde_json::from_str(data.as_str()).unwrap();
+
+        if packet.packet_type != PacketType::PIECE {
+            continue;
+        }
+
+        let bytes = packet.content.as_bytes();
+
+        let index = 512000 * packet.id;
+        for i in 0..512000 {
+            file[(index + i) as usize] = bytes[i as usize]; 
+        }
+
+        current_pieces += 1;
+    }
+
+    Ok(file)
+}
