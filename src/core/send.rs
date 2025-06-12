@@ -1,6 +1,6 @@
 use std::fs::{File, read};
 use std::io::{Read, Write, BufReader};
-use std::net::{UdpSocket, TcpStream};
+use std::net::{UdpSocket, TcpStream, TcpListener};
 
 use crate::{Packet, PacketType};
 
@@ -68,13 +68,18 @@ pub fn send_piece(piece: &[u8], peer: String) -> std::io::Result<()> {
 
 // Wait for requests from network for 
 // specific file
-pub fn await_upload_request() {
+pub async fn await_upload_request() {
     // Read from socket
-    let mut socket = TcpStream::connect("127.0.0.1:8081")
+    let mut socket = TcpListener::bind("127.0.0.1:8080")
         .expect("Failed to bind to socket");
     let mut buf: Vec<u8> = Vec::new();
-    socket.read(&mut buf).unwrap();
 
+    for stream in socket.incoming() {
+        let stream = stream.unwrap();
+        
+        let reader = BufReader::new(&stream);
+    }
+    
     let data: String = String::from_utf8(buf).unwrap();
     let packet: Packet = serde_json::from_str(&data)
         .expect("Failed to deserialize packet");

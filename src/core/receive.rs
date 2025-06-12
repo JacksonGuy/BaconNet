@@ -1,6 +1,7 @@
 use std::fs::{File, read};
 use std::io::{Read, Write, BufReader};
 use std::net::{UdpSocket, TcpStream};
+use std::sync::mpsc::{self, channel};
 
 use crate::{Packet, PacketType, FileInfo};
 
@@ -63,11 +64,11 @@ pub fn find_peers(peers: &Vec<String>) -> Vec<String> {
 }
 
 // Ensure that each peer has the desired file
-pub fn request_file_exists(peers: &Vec<String>, file: String) -> Vec<String> {
+pub fn request_file_exists(peers: &Vec<String>, file: &str) -> Vec<String> {
     let packet = Packet {
         packet_type: PacketType::FILE,
         id: 0,
-        content: file.clone(),
+        content: file.to_string(),
     };
     let data = serde_json::to_string(&packet)
         .expect("Failed to serialize packet");
@@ -149,11 +150,7 @@ pub fn assign_pieces(peers: &Vec<String>, filesize: u64) {
     }
 }
 
-pub fn receive(info: FileInfo) -> std::io::Result<Vec<u8>> {
-    let socket = UdpSocket::bind("127.0.0.1:8080")?;
-
-    let mut file: Vec<u8> = Vec::with_capacity(info.size as usize);
-    
+pub async fn receive(info: FileInfo, receiver: mpsc::Receiver<Packet>) {
     let mut expected_pieces: u64 = info.size / 512000;
     if info.size % 512000 != 0 {
         expected_pieces += 1;
@@ -162,7 +159,6 @@ pub fn receive(info: FileInfo) -> std::io::Result<Vec<u8>> {
 
     while current_pieces < expected_pieces {
         let mut buf: Vec<u8> = Vec::new();
-        let (_, _) = socket.recv_from(&mut buf)?;
         
         let data = String::from_utf8(buf).unwrap();
         let packet: Packet = serde_json::from_str(data.as_str()).unwrap();
@@ -175,11 +171,11 @@ pub fn receive(info: FileInfo) -> std::io::Result<Vec<u8>> {
 
         let index = 512000 * packet.id;
         for i in 0..512000 {
-            file[(index + i) as usize] = bytes[i as usize]; 
+            // Write the packet data to the specified location
+            // on the file we are downloading
+            todo!();
         }
 
         current_pieces += 1;
     }
-
-    Ok(file)
 }
