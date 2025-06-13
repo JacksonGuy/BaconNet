@@ -3,7 +3,10 @@ use std::io::{Read, Write, BufReader};
 use std::net::{UdpSocket, TcpStream};
 use std::sync::mpsc::{self, channel};
 
-use crate::{Packet, PacketType, FileInfo};
+use crate::{
+    Packet, PacketType, FileInfo, ThreadName,
+    Request,
+};
 
 pub fn read_network_file(filename: &str) -> FileInfo {
     let file = std::fs::read_to_string(filename)
@@ -16,57 +19,46 @@ pub fn read_network_file(filename: &str) -> FileInfo {
 // Ping list of peers stated in file info
 // to ensure they are active and have
 // the correct file
-pub fn find_peers(peers: &Vec<String>) -> Vec<String> {
-    let mut active: Vec<String> = Vec::new();
-    
-    // Create Ack packet 
+pub fn notify_peers(
+    peers: &Vec<String>, 
+    sender: &mpsc::Sender<Request>,
+    receiver: &mpsc::Receiver<Packet>) 
+{
+    // Create packet to check if awake 
     let packet = Packet {
-        packet_type: PacketType::ACK,
+        packet_type: PacketType::CheckAwake,
         id: 0,
         content: String::new(),
     };
-    let data = serde_json::to_string(&packet)
-        .expect("Failed to serialize packet");
-    let bytes = data.as_bytes();
 
     // Collect active peers
     for peer in peers {
         let mut addr: String = peer.clone();
-        addr.push_str(":8080");
+        addr.push_str(format!(":{}", crate::TCP_PORT).as_str());
 
-        // Connect to peer
-        let mut socket: TcpStream;
-        match TcpStream::connect(addr.clone()) {
-            Ok(s) => { socket = s; },
-            Err(_) => continue
-        }
+        // Create TCP Request for manager
+        let req = Request {
+            dest: addr,
+            owner: ThreadName::DOWNLOAD,
+            packet: packet.clone(),
+        };
 
-        // Send Ack packet
-        match socket.write(&bytes) {
-            Ok(_) => (),
-            Err(_) => continue
-        }
-        socket.flush().unwrap();
-
+        // Send request
+        sender.send(req);
+    
         // Wait for response
-        let mut response = String::new();
-        match socket.read_to_string(&mut response) {
-            Ok(s) => {
-                if s > 0 {
-                    active.push(addr.clone());
-                }
-            },
+        let response: Packet = match receiver.recv() {
+            Ok(res) => res,
             Err(_) => continue
-        }
+        };
+        
     }
-
-    active
 }
 
 // Ensure that each peer has the desired file
 pub fn request_file_exists(peers: &Vec<String>, file: &str) -> Vec<String> {
     let packet = Packet {
-        packet_type: PacketType::FILE,
+        packet_type: PacketType::FileCheck,
         id: 0,
         content: file.to_string(),
     };
@@ -92,7 +84,7 @@ pub fn request_file_exists(peers: &Vec<String>, file: &str) -> Vec<String> {
                     continue;
                 }
                 let p: Packet = serde_json::from_str(response.as_str()).unwrap();
-                if p.packet_type != PacketType::CONFIRM {
+                if p.packet_type != PacketType::FileConfirm {
                     continue
                 }
 
@@ -123,7 +115,7 @@ pub fn assign_pieces(peers: &Vec<String>, filesize: u64) {
         let mut socket = TcpStream::connect(peer).unwrap();
         
         let packet = Packet {
-            packet_type: PacketType::REQUEST,
+            packet_type: PacketType::PieceRequest,
             id: i,
             content: String::new(),
         };
@@ -139,7 +131,7 @@ pub fn assign_pieces(peers: &Vec<String>, filesize: u64) {
         let mut socket = TcpStream::connect(peer).unwrap();
 
         let packet = Packet {
-            packet_type: PacketType::ACK,
+            packet_type: PacketType::DownloadComplete,
             id: 0,
             content: String::new(),
         };
@@ -163,7 +155,7 @@ pub async fn receive(info: FileInfo, receiver: mpsc::Receiver<Packet>) {
         let data = String::from_utf8(buf).unwrap();
         let packet: Packet = serde_json::from_str(data.as_str()).unwrap();
 
-        if packet.packet_type != PacketType::PIECE {
+        if packet.packet_type != PacketType::PieceDelivery {
             continue;
         }
 
