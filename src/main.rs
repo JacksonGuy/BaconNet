@@ -25,7 +25,6 @@ use crate::core::structs::{
 use crate::core::receive::*;
 use crate::core::send::*;
 
-
 const TCP_PORT: u16 = 8080;
 const UDP_PORT: u16 = 8081;
 
@@ -34,11 +33,6 @@ async fn seed(files: Vec<String>, udp: UdpSocket, m_sender: Sender<Request>, m_r
 }
 
 async fn download(files: Vec<String>, udp: UdpSocket, m_sender: Sender<Request>, m_receiver: Receiver<Packet>) {
-    // Each download will have a dedicated line of communication,
-    // where the main thread (this function) will redirect packets
-    // received over TCP to the appropriate download child thread
-    let mut communications: HashMap<String, mpsc::Sender<Packet>> = HashMap::new();
-
     // Spawn download thread for each 
     // file stashed in the config file
     for file in files {
@@ -46,27 +40,23 @@ async fn download(files: Vec<String>, udp: UdpSocket, m_sender: Sender<Request>,
         // filename, created_on, size, peers
         let info: FileInfo = read_network_file(file.as_str());
        
-        // Find active peers (peers currently seeding),
-        notify_peers(&info.peers, &m_sender, &m_receiver);
+        // Find peers who are actively seeding the file 
+        let valid_peers: Vec<String> = notify_peers(&info, &m_sender, &m_receiver);
         
-        // Listen for responses
-        let mut active_peers: Vec<String> = Vec::new();
-
-
-        let valid_peers = request_file_exists(&active_peers, info.filename.as_str());
-        assign_pieces(&valid_peers, info.size);
+        // Request pieces from valid peers
+        assign_pieces(&valid_peers, info.size, &m_sender);
        
-        // Create channel for thread
-        let (sender, receiver) = channel();
-
-        // Add to map
-        communications.insert(
-            info.filename.clone(),
-            sender
-        );
+        // Clone UDP Socket
+        // Keep trying until it works lmao
+        let udp_clone: UdpSocket = loop {
+            match udp.try_clone() {
+                Ok(s) => break s,
+                Err(_) => continue
+            };
+        };
 
         // Download file and write to disk
-        tokio::spawn(receive(info.clone(), receiver));
+        tokio::spawn(receive(info.clone(), udp_clone));
         
         // This is here for reference.
         // We will need this code eventually, just not here.
@@ -90,11 +80,6 @@ async fn manager(
     download_send: mpsc::Sender<Packet>, 
     seed_send: mpsc::Sender<Packet>) 
 {
-    /* // Create TCP Socket
-    let tcp = TcpStream::connect(format!("127.0.0.1:{}", TCP_PORT))
-        .await
-        .expect("Failed to connect TCP socket"); */ 
-
     loop {
         // Check for messages from other threads
         match receiver.try_recv() {

@@ -4,8 +4,6 @@ use serde::{Serialize, Deserialize};
 pub enum PacketType {
     #[default]
     None,               // Default
-    CheckAwake,         // Check if peer is active
-    ConfirmAwake,       // Peer confirm active
     FileCheck,          // Check if peer has file
     FileConfirm,        // Peer confirm has file
     FileDeny,           // Peer doesn't have file
