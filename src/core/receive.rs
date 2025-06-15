@@ -1,7 +1,8 @@
 use std::fs::{File, read};
 use std::io::{Read, Write, BufReader};
 use std::net::{UdpSocket, TcpStream};
-use std::sync::mpsc::{self, channel};
+
+use tokio::sync::mpsc;
 
 use crate::{
     Packet, PacketType, FileInfo, ThreadName,
@@ -19,10 +20,10 @@ pub fn read_network_file(filename: &str) -> FileInfo {
 // Ping list of peers stated in file info
 // to ensure they are active and have
 // the correct file
-pub fn notify_peers(
+pub async fn notify_peers(
     info: &FileInfo, 
     sender: &mpsc::Sender<Request>,
-    receiver: &mpsc::Receiver<Packet>
+    receiver: &mut mpsc::Receiver<Packet>
 ) -> Vec<String> {
     // Create packet to check if awake 
     let packet = Packet {
@@ -48,9 +49,9 @@ pub fn notify_peers(
         sender.send(req);
    
         // Wait for response
-        let packet = match receiver.recv() {
-            Ok(p) => p,
-            Err(_) => continue
+        let packet = match receiver.recv().await {
+            Some(p) => p,
+            None => continue
         };
 
         // Add peer to active list if they confirm
@@ -115,7 +116,7 @@ pub fn assign_pieces(peers: &Vec<String>, filesize: u64, sender: &mpsc::Sender<R
 
 pub async fn receive(
     info: FileInfo, 
-    udp: UdpSocket
+    receiver: &mut mpsc::Receiver<Packet> 
 ) {
     let mut expected_pieces: u64 = info.size / 512000;
     if info.size % 512000 != 0 {
@@ -124,15 +125,10 @@ pub async fn receive(
     let mut current_pieces: u64 = 0;
 
     while current_pieces < expected_pieces {
-        let mut buf: Vec<u8> = Vec::new();
-       
-        let _ = match udp.recv(&mut buf) {
-            Ok(_) => (),
-            Err(_) => continue
+        let packet: Packet = match receiver.recv().await {
+            Some(packet) => packet,
+            None => continue
         };
-
-        let data = String::from_utf8(buf).unwrap();
-        let packet: Packet = serde_json::from_str(data.as_str()).unwrap();
 
         if packet.packet_type != PacketType::PieceDelivery {
             continue;

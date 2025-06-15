@@ -5,16 +5,14 @@ use std::thread;
 use std::collections::HashMap;
 use std::sync::{
     Arc, Mutex,
-    mpsc::{
-        self,
-        channel,
-        Sender, Receiver,
-    },
 };
 use std::net::{UdpSocket};
 
 use serde_json::json;
 use tokio::net::TcpStream;
+use tokio::sync::{
+    mpsc::{channel, Sender, Receiver}
+};
 
 mod core;
 use crate::core::structs::{
@@ -28,11 +26,22 @@ use crate::core::send::*;
 const TCP_PORT: u16 = 8080;
 const UDP_PORT: u16 = 8081;
 
+// This is arbitrary for now
+const CHANNEL_LIMIT: usize = 32;
+
 async fn seed(files: Vec<String>, udp: UdpSocket, m_sender: Sender<Request>, m_receiver: Receiver<Packet>) {
 
 }
 
-async fn download(files: Vec<String>, udp: UdpSocket, m_sender: Sender<Request>, m_receiver: Receiver<Packet>) {
+async fn download(
+    files: Vec<String>, 
+    udp: UdpSocket, 
+    m_sender: Sender<Request>, 
+    m_receiver: &mut Receiver<Packet>
+) {
+    let mut com_channels: HashMap<u64, Sender<Packet>> = HashMap::new();
+    let task_count: u64 = 0;
+
     // Spawn download thread for each 
     // file stashed in the config file
     for file in files {
@@ -41,7 +50,7 @@ async fn download(files: Vec<String>, udp: UdpSocket, m_sender: Sender<Request>,
         let info: FileInfo = read_network_file(file.as_str());
        
         // Find peers who are actively seeding the file 
-        let valid_peers: Vec<String> = notify_peers(&info, &m_sender, &m_receiver);
+        let valid_peers: Vec<String> = notify_peers(&info, &m_sender, m_receiver).await;
         
         // Request pieces from valid peers
         assign_pieces(&valid_peers, info.size, &m_sender);
@@ -55,8 +64,14 @@ async fn download(files: Vec<String>, udp: UdpSocket, m_sender: Sender<Request>,
             };
         };
 
+        // Create channel
+        let (sender, mut receiver) = channel(CHANNEL_LIMIT);
+        com_channels.insert(task_count, sender);
+
         // Download file and write to disk
-        tokio::spawn(receive(info.clone(), udp_clone));
+        tokio::spawn(async move {
+            receive(info.clone(), &mut receiver);
+        });
         
         // This is here for reference.
         // We will need this code eventually, just not here.
@@ -76,9 +91,9 @@ async fn download(files: Vec<String>, udp: UdpSocket, m_sender: Sender<Request>,
 }
 
 async fn manager(
-    receiver: mpsc::Receiver<Request>, 
-    download_send: mpsc::Sender<Packet>, 
-    seed_send: mpsc::Sender<Packet>) 
+    receiver: &mut Receiver<Request>, 
+    download_send: Sender<Packet>,  
+    seed_send: Sender<Packet>) 
 {
     loop {
         // Check for messages from other threads
@@ -210,18 +225,18 @@ fn main() {
     // Create channel for interthread communication
     
     // Download and Seed communication with manager 
-    let (sender, receiver): (mpsc::Sender<Request>, mpsc::Receiver<Request>) = channel();
+    let (sender, mut receiver): (Sender<Request>, Receiver<Request>) = channel(CHANNEL_LIMIT);
     // Manager communication with Download
-    let (download_send, download_recv): (mpsc::Sender<Packet>, mpsc::Receiver<Packet>) = channel();
+    let (download_send, mut download_recv): (Sender<Packet>, Receiver<Packet>) = channel(CHANNEL_LIMIT);
     // Manager communication with Seed
-    let (seed_send, seed_recv): (mpsc::Sender<Packet>, mpsc::Receiver<Packet>) = channel();
+    let (seed_send, mut seed_recv): (Sender<Packet>, Receiver<Packet>) = channel(CHANNEL_LIMIT);
 
     // Setup seed thread
     let udp_clone = udp.try_clone()
         .expect("Failed to clone UDP socket");
     let sender_clone = sender.clone();
     let seed_thread = thread::spawn(async move || {
-        seed(uploads, udp_clone, sender_clone, seed_recv).await;
+        seed(uploads, udp_clone, sender_clone, &mut seed_recv).await;
     });
 
     // Setup download thread
@@ -229,13 +244,13 @@ fn main() {
         .expect("Failed to clone UDP socket");
     let sender_clone = sender.clone();
     let download_thread = thread::spawn(async move || {
-        download(downloads, udp_clone, sender_clone, download_recv).await;
+        download(downloads, udp_clone, sender_clone, &mut download_recv).await;
     });
 
     // Wait for messages over TCP and
     // messages from seed and download threads
     let manager_thread = thread::spawn(async move || {
-        manager(receiver, download_send, seed_send).await;
+        manager(&mut receiver, download_send, seed_send).await;
     });
 
     let _ = seed_thread.join();
