@@ -23,11 +23,12 @@ pub enum ThreadName {
 pub struct Packet {
     pub packet_type: PacketType,
     pub id: u64,
+    pub location: u64,
     pub content: String,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-pub struct FileInfo {
+pub struct TorrentInfo {
     pub filename: String,
     pub created_on: String,
     pub size: u64,
