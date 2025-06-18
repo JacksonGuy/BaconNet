@@ -46,23 +46,26 @@ impl SeedThread {
     pub async fn get_assignments(
         self, 
         sender: &mpsc::Sender<Packet>,
-        receiver: &mpsc::Receiver<Packet>
+        receiver: &mut mpsc::Receiver<Packet>
     ) -> Vec<u64> {
         let mut piece_assignments: Vec<u64> = Vec::new();
 
+        // Read from receiver until all piece 
+        // assignments are received
         loop {
-            let mut buf: Vec<u8> = Vec::new();
-            
-            let data = String::from_utf8(buf).unwrap();
-            let packet: Packet = serde_json::from_str(data.as_str())
-                .expect("Failed to deserialize packet");
+            let packet: Packet = match receiver.try_recv() {
+                Ok(packet) => packet,
+                _ => continue
+            };
 
-            if packet.packet_type == PacketType::REQUEST {
-                piece_assignments.push(packet.id);
-            }
-
-            if packet.packet_type == PacketType::ACK {
-                break
+            match packet.packet_type {
+                PacketType::PieceRequest => {
+                    let piece = packet.location;
+                    piece_assignments.push(piece);
+                    continue;
+                },
+                PacketType::RequestDone => break,
+                _ => continue,
             }
         }
 

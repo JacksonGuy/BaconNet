@@ -50,7 +50,6 @@ async fn seed(
             }
         };
 
-        thread.get_assignments();
     }
 }
 
@@ -117,80 +116,127 @@ async fn download(
 
 }
 
+// Takes TCP requests from manager and sends the packet
+// to the specified destination
+async fn tcp_out(mut receiver: Receiver<Request>) {
+    loop {
+        // Wait for request from manager
+        match receiver.recv().await {
+            Some(req) => {
+                let tcp: TcpStream = loop {
+                    // Try to connect until successful
+                    // TODO eventually this should fail. How do
+                    // we handle said failure?
+                    match TcpStream::connect(&req.dest).await {
+                        Ok(s) => break s,
+                        Err(_) => continue,
+                    }
+                };
+                
+                // Convert packet to bytes
+                let data = serde_json::to_string(&req.packet).unwrap();
+                let bytes = data.as_bytes();
+                
+                // Try to send until successful
+                // TODO same as above
+                loop {
+                    match tcp.try_write(bytes) {
+                        Ok(_) => break,
+                        Err(_) => continue,
+                    }
+                }
+            },
+            None => continue
+        }
+    }
+}
+
+// Listens for packets over TCP and redirects
+// them to manager
+async fn tcp_in(sender: Sender<Packet>) {
+    let tcp = loop {
+        match TcpListener::bind(format!("127.0.0.1:{}", TCP_PORT)).await {
+            Ok(s) => break s,
+            Err(_) => continue,
+        }
+    };
+
+    loop {
+        let (socket, _): (TcpStream, SocketAddr) = loop {
+            match tcp.accept().await {
+                Ok(s) => break s,
+                Err(_) => continue,
+            };
+        };
+        
+        let copy = sender.clone();
+        tokio::spawn(async move {
+            handle_connection(socket, copy)
+        });
+    }
+
+    
+}
+
+// Handles individual connections from peers
+async fn handle_connection(socket: TcpStream, sender: Sender<Packet>) {
+    // Listen for packets
+    loop {
+        let mut buf: Vec<u8> = Vec::new();
+        match socket.try_read(&mut buf) {
+            Ok(_) => (),
+            Err(_) => continue,
+        }
+
+        // Convert bytes to packet
+        let data = String::from_utf8(buf).unwrap();
+        let packet: Packet = serde_json::from_str(&data).unwrap();
+        
+        // Redirect packet back to manager
+        sender.send(packet);
+    }
+}
+
 async fn manager(
     receiver: &mut Receiver<Request>, 
     download_send: Sender<Packet>,  
     seed_send: Sender<Packet>) 
 {
+    // Create TCP in and out processes
+    let (in_send, mut in_recv) = channel(CHANNEL_LIMIT);
+    let (out_send, out_recv) = channel(CHANNEL_LIMIT);
+    tokio::spawn(async move {
+        tcp_in(in_send)
+    });
+    tokio::spawn(async move {
+        tcp_out(out_recv)
+    });
+
     loop {
         // Check for messages from other threads
+        
+        // From Seed/Download threads
         match receiver.try_recv() {
             Ok(req) => {
-                let packet: Packet = req.packet;
-                let addr = format!("{}:{}", req.dest, TCP_PORT);
+                // Hand off to TCP outgoing
+                out_send.send(req);
+            },
+            _ => ()
+        }
 
-                // Connect to requested peer
-                if let Ok(tcp) = TcpStream::connect(addr).await {
-                    // Wait for the stream to be writable
-                    tcp.writable().await;
-                   
-                    // Serialize
-                    let data = serde_json::to_string(&packet).unwrap();
-                    let bytes = data.as_bytes();
-  
-                    // Send packet
-                    match tcp.try_write(bytes) {
-                        Ok(_) => (),
-                        _ => {
-                            // Failed to write to TCP socket
-                            todo!();
-                        }
-                    } 
+        // TCP packet from peer
+        match in_recv.try_recv() {
+            Ok(packet) => {
+                match packet.packet_type {
+                    PacketType::PieceDelivery => {
+                        download_send.send(packet);
+                    },
+                    _ => {
+                        seed_send.send(packet);
+                    },
                 }
-                
-            },
-            _ => ()
-        }
-
-        // Declare local TCP socket
-        let addr: SocketAddr = format!("127.0.0.1:{}", TCP_PORT)
-            .parse()
-            .unwrap();
-        let tcp = match TcpSocket::new_v4() {
-            Ok(s) => s,
-            Err(_) => continue
-        };
-        tcp.set_reuseaddr(true);
-        tcp.bind(addr).unwrap();
-
-        // Listen for data over TCP
-        let mut packet_received = false;
-        let mut buf: Vec<u8> = Vec::new();
-        
-        let tcp_listener: TcpListener = tcp.listen(1024).unwrap();
-
-        match tcp.try_read(&mut buf) {
-            Ok(0) => break,
-            Ok(_) => {
-                packet_received = true;
-            },
-            _ => ()
-        }
-
-        if packet_received {
-            // Convert bytes to packet
-            let data = String::from_utf8(buf).unwrap();
-            let packet: Packet = serde_json::from_str(data.as_str()).unwrap();
-        
-            // Redirect packet to proper thread
-            match packet.packet_type {
-                PacketType::PieceDelivery => {
-                    download_send.send(packet);
-                },
-                _ => {
-                    seed_send.send(packet);
-                },
             }
+            _ => ()
         }
     }
 }

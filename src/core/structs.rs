@@ -9,6 +9,7 @@ pub enum PacketType {
     FileDeny,           // Peer doesn't have file
     PieceRequest,       // Ask peer for piece
     PieceDelivery,      // Peer piece delivery
+    RequestDone,        // Peer has finished asking for pieces
     DownloadComplete,   // Stop sending pieces 
 }
 
