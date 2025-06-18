@@ -13,18 +13,12 @@ pub enum PacketType {
     DownloadComplete,   // Stop sending pieces 
 }
 
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
-pub enum ThreadName {
-    MANAGER,
-    DOWNLOAD,
-    SEED,
-}
-
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Packet {
     pub packet_type: PacketType,
-    pub id: u64,
-    pub location: u64,
+    pub thread_id: u64,
+    pub dest_ip: String,
+    pub from_ip: String,
     pub content: String,
 }
 
@@ -37,8 +31,8 @@ pub struct TorrentInfo {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-pub struct Request {
-    pub dest: String,
-    pub owner: ThreadName,
-    pub packet: Packet,
+pub struct PieceRequest {
+    pub dest_ip: String,
+    pub filename: String,
+    pub location: u64
 }

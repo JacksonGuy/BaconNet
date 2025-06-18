@@ -1,11 +1,14 @@
 use std::fs::{File, read};
-use std::io::{Read, Write, BufReader};
-use std::net::{UdpSocket, TcpStream, TcpListener};
 use std::error::Error;
 
 use tokio::sync::mpsc;
+use tokio::net::UdpSocket;
 
-use crate::{Packet, PacketType, TorrentInfo};
+use crate::{
+    Packet, PacketType, 
+    TorrentInfo,
+    PieceRequest
+};
 
 pub struct SeedThread {
     id: u64,
@@ -38,17 +41,16 @@ impl SeedThread {
         let info: TorrentInfo = serde_json::from_str(file.as_str())?;
 
         Ok(Self {
-            id: id,
-            info: info, 
+            id,
+            info, 
         })
     }
 
     pub async fn get_assignments(
-        self, 
-        sender: &mpsc::Sender<Packet>,
+        &self, 
         receiver: &mut mpsc::Receiver<Packet>
-    ) -> Vec<u64> {
-        let mut piece_assignments: Vec<u64> = Vec::new();
+    ) -> Vec<PieceRequest> {
+        let mut piece_assignments: Vec<PieceRequest> = Vec::new();
 
         // Read from receiver until all piece 
         // assignments are received
@@ -60,46 +62,40 @@ impl SeedThread {
 
             match packet.packet_type {
                 PacketType::PieceRequest => {
-                    let piece = packet.location;
-                    piece_assignments.push(piece);
-                    continue;
+                    let req: PieceRequest = match serde_json::from_str(&packet.content) {
+                        Ok(p) => p,
+                        Err(_) => continue
+                    };
+
+                    piece_assignments.push(req);
                 },
                 PacketType::RequestDone => break,
-                _ => continue,
+                _ => (),
             }
         }
 
         piece_assignments
     }
 
-    pub fn send_piece(piece: &[u8], peer: String) -> std::io::Result<()> {
-        let socket = UdpSocket::bind("127.0.0.1:8080")?;
+    pub async fn send_piece(
+        self,
+        request: PieceRequest, 
+        udp: UdpSocket,
+    ) {
+        if let Ok(file_bytes) = get_file_bytes(&request.filename) {
+            let piece_data = get_piece(&file_bytes, request.location);
 
-        socket.send_to(piece, peer)?; 
-
-        Ok(())
-    }
-
-    // Wait for requests from network for 
-    // specific file
-    pub async fn await_upload_request() {
-        // Read from socket
-        let mut socket = TcpListener::bind("127.0.0.1:8080")
-            .expect("Failed to bind to socket");
-        let mut buf: Vec<u8> = Vec::new();
-
-        for stream in socket.incoming() {
-            let stream = stream.unwrap();
+            let packet = Packet {
+                packet_type: PacketType::PieceDelivery,
+                thread_id: self.id,
+                dest_ip: request.dest_ip.clone(),
+                from_ip: String::new(),
+                content: String::from_utf8(piece_data).unwrap()
+            };
+            let data = serde_json::to_string(&packet).unwrap();
+            let bytes = data.as_bytes();
             
-            let reader = BufReader::new(&stream);
-        }
-        
-        let data: String = String::from_utf8(buf).unwrap();
-        let packet: Packet = serde_json::from_str(&data)
-            .expect("Failed to deserialize packet");
-        
-        if packet.packet_type == PacketType::ACK {
-            
+            udp.send_to(bytes, request.dest_ip).await.expect("Failed to send packet");
         }
     }
 }

@@ -3,23 +3,20 @@ use std::path::Path;
 use std::io::prelude::*;
 use std::thread;
 use std::collections::HashMap;
-use std::net::{SocketAddr, UdpSocket};
+use std::net::SocketAddr;
 
 use serde_json::json;
 use tokio::net::{
     TcpStream, 
-    TcpSocket,
     TcpListener,
 };
-use tokio::sync::{
-    mpsc::{channel, Sender, Receiver}
-};
+use tokio::sync::mpsc::{channel, Sender, Receiver};
+use tokio::net::UdpSocket;
 
 mod core;
 use crate::core::structs::{
-    Packet, PacketType, ThreadName,
-    TorrentInfo,
-    Request,
+    Packet, PacketType, 
+    TorrentInfo, PieceRequest
 };
 use crate::core::receive::*;
 use crate::core::send::*;
@@ -33,7 +30,7 @@ const CHANNEL_LIMIT: usize = 32;
 async fn seed(
     files: Vec<String>, 
     udp: UdpSocket, 
-    m_sender: Sender<Request>, 
+    m_sender: Sender<Packet>, 
     m_receiver: &mut Receiver<Packet>
 ) {
     let mut comm_channels: HashMap<u64, Sender<Packet>> = HashMap::new();
@@ -42,7 +39,7 @@ async fn seed(
     // Spawn seed thread for each file
     // in the config
     for file in files {
-        let mut thread: SeedThread = match SeedThread::new(id_count, file.as_str()) {
+        let thread: SeedThread = match SeedThread::new(id_count, file.as_str()) {
             Ok(t) => t,
             Err(_) => {
                 // TODO try something else here
@@ -50,13 +47,17 @@ async fn seed(
             }
         };
 
+        let pieces: Vec<PieceRequest> = thread.get_assignments(m_receiver).await;
+        tokio::spawn(async move {
+            
+        });
     }
 }
 
 async fn download(
     files: Vec<String>, 
     udp: UdpSocket, 
-    m_sender: Sender<Request>, 
+    m_sender: Sender<Packet>, 
     m_receiver: &mut Receiver<Packet>
 ) {
     let mut comm_channels: HashMap<u64, Sender<Packet>> = HashMap::new();
@@ -77,7 +78,7 @@ async fn download(
         let valid_peers: Vec<String> = thread.notify_peers(&m_sender, m_receiver).await;
         
         // Request pieces from valid peers
-        thread.assign_pieces(valid_peers, &m_sender);
+        thread.assign_pieces(valid_peers, &m_sender).await;
        
         // Create channel
         let (sender, mut receiver) = channel(CHANNEL_LIMIT);
@@ -86,7 +87,7 @@ async fn download(
 
         // Async thread to write data to disk
         tokio::spawn(async move {
-            thread.receive(&mut receiver);
+            thread.receive(&mut receiver).await;
         });
     }
 
@@ -97,7 +98,7 @@ async fn download(
                 let data: String = String::from_utf8(buf).unwrap();
                 let packet: Packet = serde_json::from_str(data.as_str()).unwrap();
                 
-                let id = packet.id;
+                let id = packet.thread_id;
                 let sender = match comm_channels.get(&id) {
                     Some(s) => s,
                     None => {
@@ -108,7 +109,7 @@ async fn download(
                         continue;
                     }
                 };
-                sender.send(packet);
+                sender.send(packet).await.unwrap();
             },
             Err(_) => continue
         }
@@ -118,23 +119,23 @@ async fn download(
 
 // Takes TCP requests from manager and sends the packet
 // to the specified destination
-async fn tcp_out(mut receiver: Receiver<Request>) {
+async fn tcp_out(mut receiver: Receiver<Packet>) {
     loop {
         // Wait for request from manager
         match receiver.recv().await {
-            Some(req) => {
+            Some(packet) => {
                 let tcp: TcpStream = loop {
                     // Try to connect until successful
                     // TODO eventually this should fail. How do
                     // we handle said failure?
-                    match TcpStream::connect(&req.dest).await {
+                    match TcpStream::connect(&packet.dest_ip).await {
                         Ok(s) => break s,
                         Err(_) => continue,
                     }
                 };
                 
                 // Convert packet to bytes
-                let data = serde_json::to_string(&req.packet).unwrap();
+                let data = serde_json::to_string(&packet).unwrap();
                 let bytes = data.as_bytes();
                 
                 // Try to send until successful
@@ -162,7 +163,7 @@ async fn tcp_in(sender: Sender<Packet>) {
     };
 
     loop {
-        let (socket, _): (TcpStream, SocketAddr) = loop {
+        let (socket, addr): (TcpStream, SocketAddr) = loop {
             match tcp.accept().await {
                 Ok(s) => break s,
                 Err(_) => continue,
@@ -171,7 +172,7 @@ async fn tcp_in(sender: Sender<Packet>) {
         
         let copy = sender.clone();
         tokio::spawn(async move {
-            handle_connection(socket, copy)
+            handle_connection(socket, addr, copy)
         });
     }
 
@@ -179,7 +180,7 @@ async fn tcp_in(sender: Sender<Packet>) {
 }
 
 // Handles individual connections from peers
-async fn handle_connection(socket: TcpStream, sender: Sender<Packet>) {
+async fn handle_connection(socket: TcpStream, addr: SocketAddr, sender: Sender<Packet>) {
     // Listen for packets
     loop {
         let mut buf: Vec<u8> = Vec::new();
@@ -190,15 +191,17 @@ async fn handle_connection(socket: TcpStream, sender: Sender<Packet>) {
 
         // Convert bytes to packet
         let data = String::from_utf8(buf).unwrap();
-        let packet: Packet = serde_json::from_str(&data).unwrap();
-        
+        let mut packet: Packet = serde_json::from_str(&data).unwrap();
+        packet.from_ip = format!("{}:{}", addr.ip(), addr.port());
+
         // Redirect packet back to manager
-        sender.send(packet);
+        // If this fails, then the program should crash anyways.
+        sender.send(packet).await.expect("Failed to send packet.");
     }
 }
 
 async fn manager(
-    receiver: &mut Receiver<Request>, 
+    receiver: &mut Receiver<Packet>, 
     download_send: Sender<Packet>,  
     seed_send: Sender<Packet>) 
 {
@@ -217,9 +220,9 @@ async fn manager(
         
         // From Seed/Download threads
         match receiver.try_recv() {
-            Ok(req) => {
+            Ok(packet) => {
                 // Hand off to TCP outgoing
-                out_send.send(req);
+                out_send.send(packet).await.unwrap();
             },
             _ => ()
         }
@@ -229,10 +232,10 @@ async fn manager(
             Ok(packet) => {
                 match packet.packet_type {
                     PacketType::PieceDelivery => {
-                        download_send.send(packet);
+                        download_send.send(packet).await.unwrap();
                     },
                     _ => {
-                        seed_send.send(packet);
+                        seed_send.send(packet).await.unwrap();
                     },
                 }
             }
@@ -306,7 +309,7 @@ fn main() {
     // Create channels for interthread communication
     
     // Download and Seed communication with manager 
-    let (sender, mut receiver): (Sender<Request>, Receiver<Request>) = channel(CHANNEL_LIMIT);
+    let (sender, mut receiver): (Sender<Packet>, Receiver<Packet>) = channel(CHANNEL_LIMIT);
     // Manager communication with Download
     let (download_send, mut download_recv): (Sender<Packet>, Receiver<Packet>) = channel(CHANNEL_LIMIT);
     // Manager communication with Seed

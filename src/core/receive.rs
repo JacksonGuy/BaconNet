@@ -1,13 +1,14 @@
-use std::fs::{OpenOptions};
+use std::fs::OpenOptions;
 use std::io::{Write, Seek, SeekFrom};
 use std::error::Error;
 
 use tokio::sync::mpsc;
 
 use crate::{
-    Packet, PacketType, TorrentInfo, ThreadName,
-    Request,
+    Packet, PacketType, TorrentInfo, 
 };
+
+use super::structs::PieceRequest;
 
 pub struct DownloadThread {
     id: u64,
@@ -20,8 +21,8 @@ impl DownloadThread {
         let info: TorrentInfo = serde_json::from_str(file.as_str())?;
 
         Ok(Self {
-            id: id,
-            info: info,
+            id,
+            info,
         })
     }
 
@@ -30,34 +31,25 @@ impl DownloadThread {
     // the correct file
     pub async fn notify_peers(
         &mut self,
-        sender: &mpsc::Sender<Request>,
+        sender: &mpsc::Sender<Packet>,
         receiver: &mut mpsc::Receiver<Packet>
     ) -> Vec<String> {
-        // Create packet to check if awake.
-        // Note the inclusion of ID. Each peer will
-        // need this so we can keep track of where to send things.
-        let packet = Packet {
-            packet_type: PacketType::FileCheck,
-            id: self.id,
-            location: 0,
-            content: self.info.filename.clone(),
-        };
-
         // Collect active peers
         let mut active: Vec<String> = Vec::new();
         for peer in &self.info.peers {
             let mut addr: String = peer.clone();
             addr.push_str(format!(":{}", crate::TCP_PORT).as_str());
 
-            // Create TCP Request for manager
-            let req = Request {
-                dest: addr,
-                owner: ThreadName::DOWNLOAD,
-                packet: packet.clone(),
+            let packet = Packet {
+                packet_type: PacketType::FileCheck,
+                thread_id: self.id,
+                dest_ip: String::new(),
+                from_ip: String::new(),
+                content: self.info.filename.clone(),
             };
 
             // Send request
-            sender.send(req);
+            sender.send(packet).await.unwrap();
        
             // Wait for response
             let packet = match receiver.recv().await {
@@ -79,10 +71,10 @@ impl DownloadThread {
     // What if peer fails to send their assigned piece?
     // -> We need to have some method to ask a different peer
     //    for the same piece
-    pub fn assign_pieces(
+    pub async fn assign_pieces(
         &mut self,
         valid_peers: Vec<String>,
-        sender: &mpsc::Sender<Request>
+        sender: &mpsc::Sender<Packet>
     ) {
         let pieces: u64 = self.info.size / 512000;
         let peer_count: u64 = valid_peers.len() as u64;
@@ -92,42 +84,43 @@ impl DownloadThread {
         for i in 0..iter {
             let index = (i % peer_count) as usize;
             let peer = valid_peers.get(index).unwrap();
-            
-            let packet = Packet {
-                packet_type: PacketType::PieceRequest,
-                id: 0,
-                location: i,
-                content: String::new(),
-            };
 
             let mut addr: String = peer.clone();
             addr.push_str(format!(":{}", crate::TCP_PORT).as_str());
-            let req = Request {
-                dest: addr,
-                owner: ThreadName::DOWNLOAD,
-                packet: packet.clone()
+           
+            let req = PieceRequest {
+                dest_ip: addr.clone(),
+                filename: self.info.filename.clone(),
+                location: i
             };
-            sender.send(req);
+            let req = serde_json::to_string(&req).unwrap();
+
+            let packet = Packet {
+                packet_type: PacketType::PieceRequest,
+                thread_id: self.id,
+                dest_ip: addr,
+                from_ip: String::new(),
+                content: req,
+            };
+
+            sender.send(packet).await.unwrap();
         }
 
         // Let peers know that we are done
         // assigning pieces
         for peer in &valid_peers {
-            let packet = Packet {
-                packet_type: PacketType::DownloadComplete,
-                id: 0,
-                location: 0,
-                content: String::new(),
-            };
-        
             let mut addr: String = peer.clone();
             addr.push_str(format!(":{}", crate::TCP_PORT).as_str());
-            let req = Request {
-                dest: addr,
-                owner: ThreadName::DOWNLOAD,
-                packet: packet.clone()
+            
+            let packet = Packet {
+                packet_type: PacketType::DownloadComplete,
+                thread_id: 0,
+                dest_ip: addr,
+                from_ip: String::new(),
+                content: String::new(),
             };
-            sender.send(req);
+
+            sender.send(packet).await.unwrap();
         }
     }
 
@@ -171,9 +164,13 @@ impl DownloadThread {
             let bytes = packet.content.as_bytes();
 
             // Write data to correct position
-            let index = 512000 * packet.location;
-            file.seek(SeekFrom::Start(index));
-            file.write_all(&bytes);
+            let location: u64 = match packet.content.parse() {
+                Ok(val) => val,
+                Err(_) => continue,
+            };
+            let index = 512000 * location;
+            file.seek(SeekFrom::Start(index)).unwrap();
+            file.write_all(&bytes).unwrap();
 
             current_pieces += 1;
         }
