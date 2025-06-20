@@ -4,6 +4,7 @@ use std::io::prelude::*;
 use std::thread;
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use serde_json::json;
 use tokio::net::{
@@ -29,7 +30,7 @@ const CHANNEL_LIMIT: usize = 32;
 
 async fn seed(
     files: Vec<String>, 
-    udp: UdpSocket, 
+    udp: Arc<UdpSocket>, 
     m_sender: Sender<Packet>, 
     m_receiver: &mut Receiver<Packet>
 ) {
@@ -39,7 +40,8 @@ async fn seed(
     // Spawn seed thread for each file
     // in the config
     for file in files {
-        let thread: SeedThread = match SeedThread::new(id_count, file.as_str()) {
+        // Create thread object
+        let mut thread: SeedThread = match SeedThread::new(id_count, file.as_str()) {
             Ok(t) => t,
             Err(_) => {
                 // TODO try something else here
@@ -47,16 +49,41 @@ async fn seed(
             }
         };
 
-        let pieces: Vec<PieceRequest> = thread.get_assignments(m_receiver).await;
+        // Create channel
+        let (sender, mut receiver) = channel(CHANNEL_LIMIT);
+        comm_channels.insert(id_count, sender);
+        id_count += 1;
+       
+        // Spawn thread for torrent
+        let udp_clone = udp.clone();
         tokio::spawn(async move {
-            
+            loop {
+                let pieces: Vec<PieceRequest> = thread.get_assignments(&mut receiver).await;
+                for piece in pieces {
+                    thread.send_piece(piece, &udp_clone).await;
+                }
+            }    
         });
+    }
+
+    // Redirect packets from manager to each
+    // individual seed thread
+    loop {
+        if let Ok(packet) = m_receiver.try_recv() {
+            let id = packet.thread_id;
+            match comm_channels.get(&id) {
+                Some(thread) => {
+                    thread.send(packet).await.unwrap();
+                }
+                None => ()
+            }
+        }
     }
 }
 
 async fn download(
     files: Vec<String>, 
-    udp: UdpSocket, 
+    udp: Arc<UdpSocket>, 
     m_sender: Sender<Packet>, 
     m_receiver: &mut Receiver<Packet>
 ) {
@@ -93,7 +120,7 @@ async fn download(
 
     loop {
         let mut buf: Vec<u8> = Vec::new();
-        match udp.recv(&mut buf) {
+        match udp.recv(&mut buf).await {
             Ok(_) => {
                 let data: String = String::from_utf8(buf).unwrap();
                 let packet: Packet = serde_json::from_str(data.as_str()).unwrap();
@@ -155,6 +182,7 @@ async fn tcp_out(mut receiver: Receiver<Packet>) {
 // Listens for packets over TCP and redirects
 // them to manager
 async fn tcp_in(sender: Sender<Packet>) {
+    // Bind socket to port
     let tcp = loop {
         match TcpListener::bind(format!("127.0.0.1:{}", TCP_PORT)).await {
             Ok(s) => break s,
@@ -163,13 +191,15 @@ async fn tcp_in(sender: Sender<Packet>) {
     };
 
     loop {
+        // Accept connection
         let (socket, addr): (TcpStream, SocketAddr) = loop {
             match tcp.accept().await {
                 Ok(s) => break s,
                 Err(_) => continue,
             };
         };
-        
+
+        // Spawn thread to handle connection
         let copy = sender.clone();
         tokio::spawn(async move {
             handle_connection(socket, addr, copy)
@@ -244,7 +274,8 @@ async fn manager(
     }
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     // Check if config file exists
     let config_exists = Path::new("./config.json").exists();
    
@@ -303,8 +334,11 @@ fn main() {
     }
 
     // Create UDP Socket 
-    let udp = UdpSocket::bind(format!("127.0.0.1:{}", UDP_PORT))
-        .expect("Failed to bind UDP socket");
+    let udp: Arc<UdpSocket> = Arc::new(
+        UdpSocket::bind(format!("127.0.0.1:{}", UDP_PORT))
+            .await
+            .expect("Failed to bind UDP socket")
+    );
 
     // Create channels for interthread communication
     
@@ -316,8 +350,7 @@ fn main() {
     let (seed_send, mut seed_recv): (Sender<Packet>, Receiver<Packet>) = channel(CHANNEL_LIMIT);
 
     // Setup seed thread
-    let udp_clone = udp.try_clone()
-        .expect("Failed to clone UDP socket");
+    let udp_clone = udp.clone();
     let sender_clone = sender.clone();
     let seed_thread = thread::spawn(async move || {
         seed(uploads, udp_clone, sender_clone, 
@@ -325,8 +358,7 @@ fn main() {
     });
 
     // Setup download thread
-    let udp_clone = udp.try_clone()
-        .expect("Failed to clone UDP socket");
+    let udp_clone = udp.clone();
     let sender_clone = sender.clone();
     let download_thread = thread::spawn(async move || {
         download(downloads, udp_clone, sender_clone, &mut download_recv).await;

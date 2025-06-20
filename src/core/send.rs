@@ -1,5 +1,6 @@
 use std::fs::{File, read};
 use std::error::Error;
+use std::sync::Arc;
 
 use tokio::sync::mpsc;
 use tokio::net::UdpSocket;
@@ -10,12 +11,7 @@ use crate::{
     PieceRequest
 };
 
-pub struct SeedThread {
-    id: u64,
-    info: TorrentInfo,
-}
-
-pub fn get_file_bytes(filename: &str) -> Result<Vec<u8>, Box<dyn Error>> {
+pub fn get_file_bytes(filename: &str) -> Result<Vec<u8>, Box<dyn Error + Send + Sync>> {
     let bytes = read(filename)?; 
 
     Ok(bytes.to_vec())
@@ -33,6 +29,11 @@ pub fn get_piece(data: &[u8], piece: u64) -> Vec<u8> {
     }
     
     result
+}
+
+pub struct SeedThread {
+    id: u64,
+    info: TorrentInfo,
 }
 
 impl SeedThread {
@@ -78,24 +79,29 @@ impl SeedThread {
     }
 
     pub async fn send_piece(
-        self,
+        &mut self,
         request: PieceRequest, 
-        udp: UdpSocket,
+        udp: &Arc<UdpSocket>,
     ) {
-        if let Ok(file_bytes) = get_file_bytes(&request.filename) {
-            let piece_data = get_piece(&file_bytes, request.location);
+        match get_file_bytes(&request.filename) {
+            Ok(file_bytes) => {
+                let piece_data = get_piece(&file_bytes, request.location);
 
-            let packet = Packet {
-                packet_type: PacketType::PieceDelivery,
-                thread_id: self.id,
-                dest_ip: request.dest_ip.clone(),
-                from_ip: String::new(),
-                content: String::from_utf8(piece_data).unwrap()
-            };
-            let data = serde_json::to_string(&packet).unwrap();
-            let bytes = data.as_bytes();
-            
-            udp.send_to(bytes, request.dest_ip).await.expect("Failed to send packet");
+                let packet = Packet {
+                    packet_type: PacketType::PieceDelivery,
+                    thread_id: self.id,
+                    dest_ip: request.dest_ip.clone(),
+                    from_ip: String::new(),
+                    content: String::from_utf8(piece_data).unwrap()
+                };
+                let data = serde_json::to_string(&packet).unwrap();
+                let bytes = data.as_bytes();
+                
+                udp.send_to(bytes, request.dest_ip)
+                .await
+                .expect("Failed to send UDP packet");
+            },
+            Err(_) => ()
         }
     }
 }
