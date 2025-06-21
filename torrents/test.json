@@ -1,0 +1,28 @@
+{
+    "images": {
+        "type": "directory",
+        "bacon.jpeg": {
+            "type": "file",
+            "size": 163247,
+            "hash": "509f063c68659c94e35c327a03735fbe58ce9637"
+        },
+        "test.png": {
+            "type": "file",
+            "size": 50009,
+            "hash": "86e7365ba603a0a74742659f4e6b82cc92c1b0ab"
+        }
+    },
+    "docs": {
+        "type": "directory",
+        "script1.txt": {
+            "type": "file",
+            "size": 1024,
+            "hash": "none"
+        }
+    },
+    "README.md": {
+        "type": "file",
+        "size": 1024,
+        "hash": "none"
+    }
+}

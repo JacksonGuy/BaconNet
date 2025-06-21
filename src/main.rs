@@ -1,3 +1,5 @@
+#![allow(warnings)]
+
 use std::fs::{self, File};
 use std::path::Path;
 use std::io::prelude::*;
@@ -15,12 +17,14 @@ use tokio::sync::mpsc::{channel, Sender, Receiver};
 use tokio::net::UdpSocket;
 
 mod core;
+mod file;
 use crate::core::structs::{
     Packet, PacketType, 
     TorrentInfo, PieceRequest
 };
 use crate::core::receive::*;
 use crate::core::send::*;
+use crate::file::torrent::{self};
 
 const TCP_PORT: u16 = 8080;
 const UDP_PORT: u16 = 8081;
@@ -276,6 +280,7 @@ async fn manager(
 
 #[tokio::main]
 async fn main() {
+    /*
     // Check if config file exists
     let config_exists = Path::new("./config.json").exists();
    
@@ -373,4 +378,9 @@ async fn main() {
     let _ = seed_thread.join();
     let _ = download_thread.join();
     let _ = manager_thread.join();
+    */
+
+    let tree = torrent::parse_torrent_file("./torrents/test.json")
+        .expect("Failed to parse torrent file");
+    torrent::print_tree(&tree, 0);
 }
