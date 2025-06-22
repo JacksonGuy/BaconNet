@@ -1,8 +1,11 @@
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::BufReader;
 use std::error::Error;
+use std::path::Path;
 
 use serde_json::Map;
+use sha1::digest::generic_array::GenericArray;
+use sha1::{Sha1, Digest};
 
 #[derive(Default, PartialEq)]
 pub enum FileType {
@@ -122,4 +125,91 @@ pub fn print_tree(tree: &FileNode, level: u16) {
             }
         }
     }
+}
+
+fn get_file_hash(path: &str) -> String {
+    let mut hasher = Sha1::new();
+    
+    // Unwrap because at this point we should be
+    // certain that the file actually exists
+    let mut file = fs::File::open(path).unwrap();
+
+    // Copy file contents
+    let n = std::io::copy(&mut file, &mut hasher).unwrap();
+
+    // Hash
+    let hash = hasher.finalize();
+
+    // Convert to string
+    let hash_str = format!("{:x}", hash);
+
+    hash_str
+}
+
+pub fn verify_file_tree(tree: &FileNode, path: &str) -> bool {
+    let path_exists = Path::new(path).exists();
+
+    if !path_exists {
+        return false
+    }
+
+    match fs::read_dir(path) {
+        Ok(contents) => {
+            for entry in contents {
+                match entry {
+                    Ok(e) => {
+                        let local_path = e.path();
+                        let path_str = local_path
+                            .to_str()        
+                            .unwrap();
+
+                        // Extract filename (last part of the path),
+                        // so either (file.extension) or folder name
+                        let parts: Vec<&str> = path_str
+                            .split("/")
+                            .collect();
+                        let filename = parts.last().unwrap();
+
+                        let is_dir = local_path.is_dir();
+                        
+                        // Check if current tree node contains the file 
+                        let mut node: Option<&FileNode> = None;
+                        for child in &tree.children {
+                            if child.filename == *filename {
+                                if !is_dir {
+                                    let hash = get_file_hash(path_str);
+                                    
+                                    if child.hash != hash {
+                                        return false
+                                    }
+                                }
+                                node = Some(child);
+                                break
+                            }
+                        }
+                        if node.is_none() {
+                            return false
+                        }
+
+                        // Print
+                        println!("{}", path_str);
+                        
+                        // Recurse if necessary
+                        if is_dir  {
+                            match verify_file_tree(node.unwrap(), path_str) {
+                                false => return false,
+                                true => continue
+                            }
+                        }
+                    }
+                    Err(_) => ()
+                }
+            }
+        },
+        Err(_) => {
+            return false
+        }
+    }
+
+    true 
 }

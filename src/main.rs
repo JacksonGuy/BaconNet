@@ -382,5 +382,9 @@ async fn main() {
 
     let tree = torrent::parse_torrent_file("./torrents/test.json")
         .expect("Failed to parse torrent file");
+    
     torrent::print_tree(&tree, 0);
+
+    let result = torrent::verify_file_tree(&tree, "./files/test");
+    println!("{}", result);
 }
