@@ -3,7 +3,7 @@ use std::io::BufReader;
 use std::error::Error;
 use std::path::Path;
 
-use serde_json::Map;
+use serde_json::{json, Value};
 use sha1::digest::generic_array::GenericArray;
 use sha1::{Sha1, Digest};
 
@@ -58,7 +58,7 @@ pub fn parse_torrent_file(filename: &str) -> Result<FileNode, Box<dyn Error>> {
     Ok(tree)
 }
 
-fn parse_tree(name: &str, obj: &serde_json::Value) -> Result<FileNode, Box<dyn Error + 'static>> {
+fn parse_tree(name: &str, obj: &Value) -> Result<FileNode, Box<dyn Error + 'static>> {
     if let Some(obj_type) = obj["type"].as_str() {
         match obj_type {
             "file" => {
@@ -212,4 +212,39 @@ pub fn verify_file_tree(tree: &FileNode, path: &str) -> bool {
     }
 
     true 
+}
+
+pub fn create_torrent_file(path: &str) -> Result<(), Box<dyn Error>> {
+    if Path::new(path).exists() {
+        let data = dir_to_json(path)?;
+        let parts: Vec<&str> = path
+            .split("/")
+            .collect();
+        let name = parts.last().unwrap();
+
+        let mut file = File::create(name)?;
+    
+        Ok(())
+    }
+    else {
+        Err("Directory doesn't exist")?
+    }
+}
+
+fn dir_to_json(path: &str) -> Result<Value, Box<dyn Error>> {
+    let mut data: Value = json!({});
+
+    let entries = fs::read_dir(path)?;
+    for entry in entries {
+        let entry = entry?;
+        let metadata = entry.metadata()?;
+        if metadata.is_dir() {
+            if let Some(json) = data.as_object_mut() {
+                let addon = dir_to_json(entry.path().into_os_string().to_str().unwrap()).unwrap();
+                json.extend(addon);
+            }
+        }
+    }
+
+    Ok(data)
 }
