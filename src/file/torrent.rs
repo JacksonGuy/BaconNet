@@ -1,13 +1,15 @@
+use std::env;
 use std::fs::{self, File};
-use std::io::BufReader;
+use std::io::{BufReader, Write};
 use std::error::Error;
 use std::path::Path;
 
-use serde_json::{json, Value};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value, Map};
 use sha1::digest::generic_array::GenericArray;
 use sha1::{Sha1, Digest};
 
-#[derive(Default, PartialEq)]
+#[derive(Default, PartialEq, Serialize, Deserialize)]
 pub enum FileType {
     #[default]
     NONE,
@@ -130,9 +132,9 @@ pub fn print_tree(tree: &FileNode, level: u16) {
 fn get_file_hash(path: &str) -> String {
     let mut hasher = Sha1::new();
     
-    // Unwrap because at this point we should be
-    // certain that the file actually exists
-    let mut file = fs::File::open(path).unwrap();
+    let path = path.replace("\"", "");
+    let mut file = fs::File::open(path)
+        .expect("Failed to hash file");
 
     // Copy file contents
     let n = std::io::copy(&mut file, &mut hasher).unwrap();
@@ -192,7 +194,7 @@ pub fn verify_file_tree(tree: &FileNode, path: &str) -> bool {
                         }
 
                         // Print
-                        println!("{}", path_str);
+                        //println!("{}", path_str);
                         
                         // Recurse if necessary
                         if is_dir  {
@@ -216,14 +218,24 @@ pub fn verify_file_tree(tree: &FileNode, path: &str) -> bool {
 
 pub fn create_torrent_file(path: &str) -> Result<(), Box<dyn Error>> {
     if Path::new(path).exists() {
-        let data = dir_to_json(path)?;
+        // Gather directory details
         let parts: Vec<&str> = path
             .split("/")
             .collect();
         let name = parts.last().unwrap();
 
-        let mut file = File::create(name)?;
-    
+        // Create JSON file
+        let filename = format!("./torrents/{}.json", name);
+        let mut file = File::create(filename)?;
+   
+        // Get JSON description of directory
+        let json = dir_to_json(path)?;
+
+        // Write JSON data to file
+        let data = serde_json::to_string_pretty(&json)?;
+        let data = data.as_bytes();
+        file.write_all(data)?;
+
         Ok(())
     }
     else {
@@ -231,20 +243,48 @@ pub fn create_torrent_file(path: &str) -> Result<(), Box<dyn Error>> {
     }
 }
 
-fn dir_to_json(path: &str) -> Result<Value, Box<dyn Error>> {
-    let mut data: Value = json!({});
+pub fn dir_to_json(path: &str) -> Result<Value, Box<dyn Error>> {
+    let mut return_data: Map<String, Value> = Map::new();
 
     let entries = fs::read_dir(path)?;
     for entry in entries {
-        let entry = entry?;
+        let entry = entry.unwrap();
         let metadata = entry.metadata()?;
+
+        // file metadata
+        let filename = entry.file_name().into_string().unwrap();
+        let filetype = match metadata.is_dir() {
+            true => "directory",
+            false => "file",
+            _ => "none"
+        };
+        let filesize = metadata.len();
+
+        //println!("{:?}", entry.path());
+    
         if metadata.is_dir() {
-            if let Some(json) = data.as_object_mut() {
-                let addon = dir_to_json(entry.path().into_os_string().to_str().unwrap()).unwrap();
-                json.extend(addon);
-            }
+            let new_path = entry.path();
+            let new_path = new_path.to_str().unwrap();
+            let mut data = dir_to_json(new_path)?;
+            let data = data.as_object_mut().unwrap();
+
+            data.insert("type".to_string(), json!("directory"));
+
+            let data = serde_json::to_value(data)?;
+
+            return_data.insert(filename.clone(), data);
+        }
+        else {
+            let hash = get_file_hash(&format!("{:?}", entry.path()));
+
+            return_data.insert(filename, json!({
+                "type": filetype,
+                "size": filesize,
+                "hash": hash 
+            }));
         }
     }
 
-    Ok(data)
+    let return_data = serde_json::to_value(return_data)?;
+    Ok(return_data)
 }

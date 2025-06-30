@@ -380,10 +380,12 @@ async fn main() {
     let _ = manager_thread.join();
     */
 
+    torrent::create_torrent_file("./files/test").expect("Failed to create JSON file");
+
     let tree = torrent::parse_torrent_file("./torrents/test.json")
         .expect("Failed to parse torrent file");
     
-    torrent::print_tree(&tree, 0);
+    //torrent::print_tree(&tree, 0);
 
     let result = torrent::verify_file_tree(&tree, "./files/test");
     println!("{}", result);
