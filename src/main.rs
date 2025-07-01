@@ -280,7 +280,6 @@ async fn manager(
 
 #[tokio::main]
 async fn main() {
-    /*
     // Check if config file exists
     let config_exists = Path::new("./config.json").exists();
    
@@ -288,6 +287,8 @@ async fn main() {
     let mut uploads: Vec<String> = Vec::new();
 
     if config_exists {
+        println!("[MAIN] Reading config file");
+
         // Open and read config file
         let config = fs::File::open("./config.json")
             .expect("Failed to open config file");
@@ -321,6 +322,8 @@ async fn main() {
         }
     }
     else {
+        println!("[MAIN] Create config file");
+
         // Create config file
         let mut file = File::create("./config.json")
             .expect("Failed to create config file");
@@ -332,7 +335,7 @@ async fn main() {
         });
         
         // Write data to file
-        let json_str: String = serde_json::to_string(&data)
+        let json_str: String = serde_json::to_string_pretty(&data)
             .expect("Failed to serialize config");
         file.write(json_str.as_bytes())
             .expect("Failed to write to file");
@@ -354,10 +357,20 @@ async fn main() {
     // Manager communication with Seed
     let (seed_send, mut seed_recv): (Sender<Packet>, Receiver<Packet>) = channel(CHANNEL_LIMIT);
 
+    println!("Seeding:");
+    for entry in &uploads {
+        println!("{}", entry);
+    }
+    println!("Downloading:");
+    for entry in &downloads {
+        println!("{}", entry);
+    }
+
     // Setup seed thread
     let udp_clone = udp.clone();
     let sender_clone = sender.clone();
-    let seed_thread = thread::spawn(async move || {
+    let seed_thread = tokio::spawn(async move {
+        println!("[MAIN] Spawning seed thread");
         seed(uploads, udp_clone, sender_clone, 
             &mut seed_recv).await;
     });
@@ -365,21 +378,28 @@ async fn main() {
     // Setup download thread
     let udp_clone = udp.clone();
     let sender_clone = sender.clone();
-    let download_thread = thread::spawn(async move || {
+    let download_thread = tokio::spawn(async move {
+        println!("[MAIN] Spawning download thread");
         download(downloads, udp_clone, sender_clone, &mut download_recv).await;
     });
 
     // Wait for messages over TCP and
     // messages from seed and download threads
-    let manager_thread = thread::spawn(async move || {
+    let manager_thread = tokio::spawn(async move {
+        println!("[MAIN] Spawning manager thread");
         manager(&mut receiver, download_send, seed_send).await;
     });
 
-    let _ = seed_thread.join();
-    let _ = download_thread.join();
-    let _ = manager_thread.join();
-    */
+    println!("[MAIN] Program running");
+    
 
+    let _ = seed_thread.await;
+    let _ = download_thread.await;
+    let _ = manager_thread.await;
+
+    println!("[MAIN] Exiting...");
+
+    /*
     torrent::create_torrent_file("./files/test").expect("Failed to create JSON file");
 
     let tree = torrent::parse_torrent_file("./torrents/test.json")
@@ -389,4 +409,5 @@ async fn main() {
 
     let result = torrent::verify_file_tree(&tree, "./files/test");
     println!("{}", result);
+    */
 }
